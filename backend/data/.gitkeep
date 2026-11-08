@@ -1,0 +1,112 @@
+const fs = require('fs');
+const path = require('path');
+
+function ensureDirectory(dirPath) {
+  fs.mkdirSync(dirPath, { recursive: true });
+}
+
+function normalizeRelativePath(filePath) {
+  return filePath.split(path.sep).join('/');
+}
+
+function toSafePath(value) {
+  return value.split(path.sep).join('/').replace(/^\.\//, '').replace(/^\//, '');
+}
+
+function getMediaRoot() {
+  return path.resolve(process.env.MEDIA_ROOT || path.join(__dirname, '..', 'media'));
+}
+
+function getDownloadsRoot() {
+  return path.resolve(process.env.DOWNLOADS_ROOT || path.join(__dirname, '..', 'downloads'));
+}
+
+function toTitleCase(value) {
+  return value
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .split(' ')
+    .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    .join(' ');
+}
+
+function guessMediaType(extension) {
+  const video = new Set(['.mp4', '.mkv', '.avi', '.mov', '.m4v', '.webm']);
+  const audio = new Set(['.mp3', '.m4a', '.wav', '.flac']);
+  const image = new Set(['.jpg', '.jpeg', '.png', '.webp']);
+
+  if (video.has(extension)) return 'video';
+  if (audio.has(extension)) return 'audio';
+  if (image.has(extension)) return 'image';
+  return 'unknown';
+}
+
+function guessMimeType(extension) {
+  const map = {
+    '.mp4': 'video/mp4',
+    '.mkv': 'video/x-matroska',
+    '.avi': 'video/x-msvideo',
+    '.mov': 'video/quicktime',
+    '.m4v': 'video/x-m4v',
+    '.mp3': 'audio/mpeg',
+    '.m4a': 'audio/mp4',
+    '.wav': 'audio/wav',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.webp': 'image/webp',
+    '.srt': 'text/plain',
+    '.ass': 'text/plain'
+  };
+
+  return map[extension.toLowerCase()] || 'application/octet-stream';
+}
+
+function buildFileMetadata(filePath, rootDir = process.cwd()) {
+  const ext = path.extname(filePath).toLowerCase();
+  const basename = path.basename(filePath, ext);
+  const relativePath = normalizeRelativePath(path.relative(rootDir, filePath));
+  const fileStat = fs.statSync(filePath);
+  const folderNames = path.dirname(filePath).split(path.sep).slice(-3);
+  const softGenres = folderNames.filter(Boolean).map(n => toTitleCase(n)).slice(0, 2).join(', ');
+
+  const title = basename
+    .replace(/\.[^/.]+$/, '')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const formattedTitle = title ? toTitleCase(title) : 'Untitled Media';
+  const year = (() => {
+    const match = formattedTitle.match(/(19|20)\d{2}/);
+    return match ? Number(match[1] + match[2] + match[3] + match[4]) : null;
+  })();
+
+  return {
+    title: formattedTitle,
+    relative_path: toSafePath(relativePath),
+    absolute_path: filePath,
+    media_type: guessMediaType(ext),
+    file_extension: ext,
+    file_size: fileStat.size,
+    last_modified: fileStat.mtimeMs,
+    mime_type: guessMimeType(ext),
+    description: `Local ${guessMediaType(ext)} item enriched from filename and folder structure. ${softGenres ? `Tags: ${softGenres}` : 'No explicit tags detected.'}`,
+    genres: softGenres || 'General',
+    year,
+    language: 'ar',
+    metadata_source: 'ai-local-heuristic'
+  };
+}
+
+module.exports = {
+  ensureDirectory,
+  normalizeRelativePath,
+  toSafePath,
+  getMediaRoot,
+  getDownloadsRoot,
+  buildFileMetadata,
+  guessMediaType,
+  guessMimeType
+};
