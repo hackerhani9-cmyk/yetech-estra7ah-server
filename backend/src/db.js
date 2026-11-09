@@ -1,125 +1,123 @@
-const express = require('express');
-const cors = require('cors');
-const morgan = require('morgan');
-const path = require('path');
 const fs = require('fs');
-const dotenv = require('dotenv');
-const { db, getLibrary, getMediaById, getStats, saveDownload } = require('./db');
-const { scanLibrary, scanDownloads } = require('./mediaScanner');
-const { ensureDirectory, getMediaRoot, getDownloadsRoot } = require('./utils');
+const path = require('path');
+const Database = require('better-sqlite3');
+const { buildFileMetadata } = require('./utils');
 
-dotenv.config({ path: path.join(__dirname, '..', '.env') });
+const dbPath = process.env.DB_PATH || path.join(__dirname, '..', 'data', 'media.db');
+const dbDir = path.dirname(dbPath);
 
-const app = express();
-const port = Number(process.env.PORT || 3001);
-const host = process.env.HOST || '0.0.0.0';
-const mediaRoot = getMediaRoot();
-const downloadsRoot = getDownloadsRoot();
+fs.mkdirSync(dbDir, { recursive: true });
+const db = new Database(dbPath);
 
-ensureDirectory(mediaRoot);
-ensureDirectory(downloadsRoot);
-ensureDirectory(path.dirname(process.env.DB_PATH || path.join(__dirname, '..', 'data', 'media.db')));
+db.exec(`
+  CREATE TABLE IF NOT EXISTS media_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    relative_path TEXT UNIQUE NOT NULL,
+    absolute_path TEXT,
+    media_type TEXT,
+    file_extension TEXT,
+    file_size INTEGER,
+    last_modified INTEGER,
+    mime_type TEXT,
+    description TEXT,
+    genres TEXT,
+    year INTEGER,
+    language TEXT,
+    metadata_source TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
 
-app.use(cors());
-app.use(express.json());
-app.use(morgan('combined'));
+  CREATE TABLE IF NOT EXISTS downloads (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    filename TEXT,
+    source_url TEXT,
+    status TEXT DEFAULT 'queued',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+`);
 
-app.use('/api/media', express.static(mediaRoot));
-app.use('/api/downloads', express.static(downloadsRoot));
+function upsertMedia(filePath, rootDir) {
+  const metadata = buildFileMetadata(filePath, rootDir);
+  const stmt = db.prepare(`
+    INSERT INTO media_items (
+      title, relative_path, absolute_path, media_type, file_extension,
+      file_size, last_modified, mime_type, description, genres, year,
+      language, metadata_source, updated_at
+    ) VALUES (
+      @title, @relative_path, @absolute_path, @media_type, @file_extension,
+      @file_size, @last_modified, @mime_type, @description, @genres, @year,
+      @language, @metadata_source, @updated_at
+    )
+    ON CONFLICT(relative_path) DO UPDATE SET
+      title = excluded.title,
+      absolute_path = excluded.absolute_path,
+      media_type = excluded.media_type,
+      file_extension = excluded.file_extension,
+      file_size = excluded.file_size,
+      last_modified = excluded.last_modified,
+      mime_type = excluded.mime_type,
+      description = excluded.description,
+      genres = excluded.genres,
+      year = excluded.year,
+      language = excluded.language,
+      metadata_source = excluded.metadata_source,
+      updated_at = excluded.updated_at
+  `);
 
-app.get('/api/health', (req, res) => {
-  res.json({
-    ok: true,
-    service: 'yetech-estra7ah-server',
-    mode: 'offline-local',
-    mediaRoot,
-    downloadsRoot,
-    dbPath: process.env.DB_PATH || path.join(__dirname, '..', 'data', 'media.db'),
-    time: new Date().toISOString()
-  });
-});
-
-app.get('/api/library', (req, res) => {
-  res.json(getLibrary());
-});
-
-app.get('/api/stats', (req, res) => {
-  res.json(getStats());
-});
-
-app.get('/api/media/:id', (req, res) => {
-  const item = getMediaById(Number(req.params.id));
-  if (!item) return res.status(404).json({ error: 'Media item not found' });
-  const filePath = path.join(mediaRoot, item.relative_path);
-  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File missing on disk' });
-
-  res.sendFile(filePath, { headers: { 'Content-Type': item.mimeType || 'application/octet-stream' } });
-});
-
-app.get('/api/stream/:id', (req, res) => {
-  const item = getMediaById(Number(req.params.id));
-  if (!item) return res.status(404).json({ error: 'Media item not found' });
-
-  const filePath = item.absolute_path || path.join(mediaRoot, item.relative_path);
-  if (!fs.existsSync(filePath)) {
-    return res.status(404).json({ error: 'File not found' });
-  }
-
-  const stat = fs.statSync(filePath);
-  const range = req.headers.range;
-  if (!range) {
-    res.writeHead(200, {
-      'Content-Type': item.mimeType || 'application/octet-stream',
-      'Content-Length': stat.size,
-      'Accept-Ranges': 'bytes'
-    });
-    fs.createReadStream(filePath).pipe(res);
-    return;
-  }
-
-  const parts = range.replace(/bytes=/, '').split('-');
-  const start = Number(parts[0]);
-  const end = parts[1] ? Number(parts[1]) : stat.size - 1;
-  const chunkSize = end - start + 1;
-  const stream = fs.createReadStream(filePath, { start, end });
-
-  res.writeHead(206, {
-    'Content-Type': item.mimeType || 'application/octet-stream',
-    'Content-Length': chunkSize,
-    'Content-Range': `bytes ${start}-${end}/${stat.size}`,
-    'Accept-Ranges': 'bytes'
+  stmt.run({
+    title: metadata.title,
+    relative_path: metadata.relative_path,
+    absolute_path: filePath,
+    media_type: metadata.media_type,
+    file_extension: metadata.file_extension,
+    file_size: metadata.file_size,
+    last_modified: metadata.last_modified,
+    mime_type: metadata.mimeType,
+    description: metadata.description,
+    genres: metadata.genres,
+    year: metadata.year,
+    language: metadata.language,
+    metadata_source: metadata.metadata_source,
+    updated_at: new Date().toISOString()
   });
 
-  stream.pipe(res);
-});
+  return metadata;
+}
 
-app.post('/api/scan', (req, res) => {
-  const result = scanLibrary(mediaRoot);
-  res.json(result);
-});
+function getLibrary() {
+  return db.prepare('SELECT * FROM media_items ORDER BY updated_at DESC').all();
+}
 
-app.get('/api/downloads', (req, res) => {
-  res.json(scanDownloads(downloadsRoot));
-});
+function getMediaById(id) {
+  return db.prepare('SELECT * FROM media_items WHERE id = ?').get(id);
+}
 
-app.post('/api/downloads/watch', (req, res) => {
-  const result = scanDownloads(downloadsRoot);
-  res.json(result);
-});
+function getStats() {
+  const total = db.prepare('SELECT COUNT(*) AS count FROM media_items').get();
+  const videos = db.prepare("SELECT COUNT(*) AS count FROM media_items WHERE media_type = 'video'").get();
+  const audio = db.prepare("SELECT COUNT(*) AS count FROM media_items WHERE media_type = 'audio'").get();
+  const images = db.prepare("SELECT COUNT(*) AS count FROM media_items WHERE media_type = 'image'").get();
 
-app.get('/api/test', (req, res) => {
-  res.json({ message: 'Backend is responsive', mediaRoot, downloadsRoot });
-});
+  return {
+    total: total.count,
+    videos: videos.count,
+    audio: audio.count,
+    images: images.count
+  };
+}
 
-scanLibrary(mediaRoot);
-scanDownloads(downloadsRoot);
+function saveDownload(filename, sourceUrl = '') {
+  const stmt = db.prepare('INSERT INTO downloads (filename, source_url, status, created_at) VALUES (?, ?, ?, ?)');
+  stmt.run(filename, sourceUrl, 'queued', new Date().toISOString());
+}
 
-setInterval(() => {
-  scanDownloads(downloadsRoot);
-}, 15000);
-
-app.listen(port, host, () => {
-  console.log(`YeTech Estra7ah backend listening on http://${host}:${port}`);
-});
-
-module.exports = app;
+module.exports = {
+  db,
+  upsertMedia,
+  getLibrary,
+  getMediaById,
+  getStats,
+  saveDownload
+};

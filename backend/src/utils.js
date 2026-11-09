@@ -1,33 +1,81 @@
 const fs = require('fs');
 const path = require('path');
-const { saveDownload, upsertMedia } = require('./db');
-const { toSafePath } = require('./utils');
 
-function watchDownloads(rootDir) {
-  const root = path.resolve(rootDir);
-  if (!fs.existsSync(root)) {
-    fs.mkdirSync(root, { recursive: true });
-  }
+function ensureDirectory(targetDir) {
+  fs.mkdirSync(targetDir, { recursive: true });
+  return targetDir;
+}
 
-  const files = fs.readdirSync(root, { withFileTypes: true });
-  const imported = [];
+function getMediaRoot() {
+  const configured = process.env.MEDIA_ROOT || './media';
+  return path.resolve(__dirname, '..', configured);
+}
 
-  for (const entry of files) {
-    if (!entry.isFile()) continue;
-    const fullPath = path.join(root, entry.name);
-    const ext = path.extname(entry.name).toLowerCase();
-    const supported = ['.mp4', '.mkv', '.avi', '.mov', '.m4v', '.mp3', '.m4a', '.wav', '.jpg', '.jpeg', '.png', '.webp'];
+function getDownloadsRoot() {
+  const configured = process.env.DOWNLOADS_ROOT || './downloads';
+  return path.resolve(__dirname, '..', configured);
+}
 
-    if (!supported.includes(ext)) continue;
+function normalizeRelativePath(value) {
+  return value.split(path.sep).join('/');
+}
 
-    saveDownload(entry.name, 'local://downloads');
-    const metadata = upsertMedia(fullPath, root);
-    imported.push({ filename: entry.name, metadata, relative_path: toSafePath(path.relative(root, fullPath)) });
-  }
+function toSafePath(value) {
+  const normalized = normalizeRelativePath(value).replace(/^\/+/, '').replace(/^\.\.(?:\/|$)+/, '');
+  return normalized.replace(/\/+/g, '/');
+}
 
-  return { root, imported, scanned: imported.length };
+function buildFileMetadata(filePath, rootDir) {
+  const stat = fs.statSync(filePath);
+  const extension = path.extname(filePath).toLowerCase();
+  const relativePath = normalizeRelativePath(path.relative(rootDir, filePath));
+  const safeRelativePath = toSafePath(relativePath);
+  const baseName = path.basename(filePath, extension).replace(/[_-]+/g, ' ').trim();
+
+  let mediaType = 'image';
+  if (['.mp4', '.mkv', '.avi', '.mov', '.m4v', '.webm'].includes(extension)) mediaType = 'video';
+  else if (['.mp3', '.m4a', '.wav', '.ogg', '.flac'].includes(extension)) mediaType = 'audio';
+
+  const mimeTypeMap = {
+    '.mp4': 'video/mp4',
+    '.mkv': 'video/x-matroska',
+    '.avi': 'video/x-msvideo',
+    '.mov': 'video/quicktime',
+    '.m4v': 'video/x-m4v',
+    '.webm': 'video/webm',
+    '.mp3': 'audio/mpeg',
+    '.m4a': 'audio/mp4',
+    '.wav': 'audio/wav',
+    '.ogg': 'audio/ogg',
+    '.flac': 'audio/flac',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.webp': 'image/webp'
+  };
+
+  return {
+    title: baseName || path.basename(filePath),
+    relative_path: safeRelativePath,
+    absolute_path: filePath,
+    media_type: mediaType,
+    file_extension: extension.replace('.', '') || 'file',
+    file_size: stat.size,
+    last_modified: Math.floor(stat.mtimeMs),
+    mimeType: mimeTypeMap[extension] || 'application/octet-stream',
+    description: 'Local media item',
+    genres: 'local',
+    year: null,
+    language: 'ar',
+    metadata_source: 'local'
+  };
 }
 
 module.exports = {
-  watchDownloads
+  ensureDirectory,
+  getMediaRoot,
+  getDownloadsRoot,
+  normalizeRelativePath,
+  toSafePath,
+  buildFileMetadata
 };
